@@ -22,28 +22,61 @@ class ToMeBlock(Block):
         return self.drop_path2(x) if hasattr(self, "drop_path2") else self.drop_path(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Note: this is copied from timm.models.vision_transformer.Block with modifications.
-        attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
-        x_attn, metric = self.attn(self.norm1(x), attn_size)
-        x = x + self._drop_path1(x_attn)
+        if self._tome_info["reduce"]:
 
-        r = self._tome_info["r"].pop(0)
-        if r > 0:
-            # Apply ToMe here
-            merge, _ = bipartite_soft_matching(
-                metric,
-                r,
-                self._tome_info["class_token"],
-                self._tome_info["distill_token"],
-            )
-            if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(
-                    merge, x, self._tome_info["source"]
+            # Note: this is copied from timm.models.vision_transformer.Block with modifications.
+            attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
+            x_attn, metric = self.attn(self.norm1(x), attn_size)
+            x = x + self._drop_path1(x_attn)
+
+            r = self._tome_info["r"].pop(0)
+            if r > 0:
+                # Apply ToMe here
+                merge, _ = bipartite_soft_matching(
+                    metric,
+                    r,
+                    self._tome_info["class_token"],
+                    self._tome_info["distill_token"],
                 )
-            x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
-            # print(self._tome_info["size"])
+                if self._tome_info["trace_source"]:
+                    self._tome_info["source"] = merge_source(
+                        merge, x, self._tome_info["source"]
+                    )
+                x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+                # print(self._tome_info["size"])
 
-        x = x + self._drop_path2(self.mlp(self.norm2(x)))
+            x = x + self._drop_path2(self.mlp(self.norm2(x)))
+        else:
+            attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
+            r = self._tome_info["r"].pop(0)   
+            if r > 0:
+                # Apply ToMe here
+                # print(self._tome_info["size"])
+                merge, unmerge = bipartite_soft_matching(
+                    x,
+                    r,
+                    self._tome_info["class_token"],
+                    self._tome_info["distill_token"],
+                )
+            norm_x = self.norm1(x)
+
+            if r > 0:
+                if self._tome_info["trace_source"]:
+                    self._tome_info["source"] = merge_source(
+                        merge, norm_x, self._tome_info["source"]
+                    )
+                norm_x, self._tome_info["size"] = merge_wavg(merge, norm_x)
+                # print(self._tome_info["size"])
+
+            x_attn, metric = self.attn(norm_x, attn_size)
+
+            if r > 0:
+                x_attn = unmerge(x_attn)
+
+            x = x + self._drop_path1(x_attn)
+
+        
+            x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
 
 
@@ -105,7 +138,11 @@ def make_tome_class(transformer_class):
 
 
 def patch_timm(
-    model: VisionTransformer, r: int = 0, trace_source: bool = False, prop_attn: bool = True
+    model: VisionTransformer, 
+    r: int = 0, 
+    trace_source: bool = False, 
+    prop_attn: bool = True, 
+    reduce_mode : bool = True
 ):
     """
     Applies ToMe to this transformer. Afterward, set r using model.r.
@@ -124,6 +161,7 @@ def patch_timm(
         "r": model.r,
         "size": None,
         "source": None,
+        "reduce": reduce_mode,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
         "class_token": model.cls_token is not None,
